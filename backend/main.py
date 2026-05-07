@@ -413,7 +413,7 @@ async def learning_roadmap(request: RoadmapRequest):
     # Enrich each roadmap item with a real URL via Brave Search
     brave_key = os.getenv("BRAVE_API_KEY")
     if brave_key:
-        sem = asyncio.Semaphore(5)  # max 5 concurrent Brave requests
+        sem = asyncio.Semaphore(3)  # max 5 concurrent Brave requests
 
         async def fetch_url(item: dict, http: httpx.AsyncClient) -> dict:
             query = f"{item.get('resource', '')} {item.get('provider', '')}"

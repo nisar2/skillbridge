@@ -153,8 +153,6 @@ No persona context is injected. The model applies standard gap analysis and road
 
 **UI effects:** Certification roadmap items display a **🎓 Cert Pick** badge.
 
-**Designed for:** `demo/jamie_park_resume.pdf` — Jamie Park, CS & Statistics graduate with project experience but no full-time work history.
-
 ### `switcher` — Career Switcher
 
 **Gap analysis context injected:**
@@ -164,10 +162,6 @@ No persona context is injected. The model applies standard gap analysis and road
 > "Persona note: This candidate is switching careers. Where possible, suggest resources that explicitly bridge their prior domain to the target role and build on their existing background."
 
 **UI effects:** The gap analysis results include a **🔄 Transferable Skills** section that would otherwise be hidden.
-
-**Designed for:** `demo/rachel_okonkwo_resume.pdf` — Rachel Okonkwo, a senior financial analyst with 7 years of SQL, Excel, and Tableau experience pivoting into data science.
-
----
 
 ## Exact Prompts
 
@@ -340,10 +334,6 @@ Parsing, extraction, and analysis tasks require consistent JSON structure — de
 ### Concurrent Brave Search with Semaphore
 
 Roadmap generation can produce 10–20 items, each requiring a URL lookup. Running these sequentially would add 10–20 seconds of latency. Using `asyncio.gather` with a `Semaphore(5)` fires all requests concurrently while respecting Brave's per-second rate limit. A failed URL fetch is silently swallowed (the item is returned without a URL) so that a single rate-limit spike doesn't break the entire roadmap.
-
-### Regex JSON extraction as a safety net
-
-Every OpenAI response is parsed through `re.search(r'\{.*\}', raw, re.DOTALL)` or `re.search(r'\[.*\]', raw, re.DOTALL)` before `json.loads`. This handles cases where the model wraps its response in markdown code fences (e.g. ` ```json ... ``` `) despite being instructed not to. It is a pragmatic defence against a common model behaviour rather than a sign the prompts are poorly written.
 
 ### Persona as a context injection, not a separate model
 

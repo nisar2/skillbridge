@@ -2,6 +2,10 @@
 
 A four-step AI-powered career tool that takes a PDF resume, finds real job listings, analyses skill gaps, and generates a personalised learning roadmap with real resource URLs.
 
+🎥 Video Presentation *(link coming soon)*
+
+📊 [Slide Deck](https://docs.google.com/presentation/d/16oonIEplB5HSoW5fj9-vSnraVWM9CUUfhHlZ4dj3D74/edit?usp=sharing)
+
 ---
 
 ## Table of Contents
@@ -369,7 +373,7 @@ Without this filter, JSearch returns a mix of fresh and stale listings, some of 
 ### 1. Clone the repository
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/nisar2/skillbridge.git
 cd skillbridge
 ```
 

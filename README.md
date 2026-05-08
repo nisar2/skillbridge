@@ -1,6 +1,6 @@
 # Skill-Bridge Career Navigator
 
-A four-step AI-powered career tool that takes a PDF resume, finds real job listings, analyses skill gaps, and generates a personalised learning roadmap with real resource URLs.
+An AI-powered career tool that takes a PDF resume, finds real job listings, analyses skill gaps, and generates a personalised learning roadmap with real resource URLs.
 
 🎥 Video Presentation *(link coming soon)*
 
@@ -27,29 +27,30 @@ A four-step AI-powered career tool that takes a PDF resume, finds real job listi
 
 ![Architecture](architecture.jpg)
 
-The pipeline has three parallel inputs that converge into a two-stage AI processing chain:
+The pipeline has three parallel inputs that converge into a two-stage AI processing pipeline:
 
-**Persona Selection** — The user picks a persona (Recent Grad, Career Switcher, or Mentor) before running any analysis. The selected persona flows as a context modifier into both the Skill Gap Analysis and the Upskill Roadmap Generator, shaping how results are weighted and presented.
+**Persona Selection** — The user picks a persona (Recent Grad or Career Switcher) before running any analysis. The selected persona flows as a context modifier into both the Skill Gap Analysis and the Upskill Roadmap Generator, shaping how results are weighted and presented. A General option is also available which skips the persona context modification
 
-**Resume Parsing** — A PDF resume is fed through pdfplumber to extract raw text, which is then sent to OpenAI (gpt-4o-mini) to produce a structured **Current Experience JSON** containing skills, work experience, and projects.
+**Resume Parsing** — A PDF resume is fed through [`pdfplumber`](https://github.com/jsvine/pdfplumber) to extract raw text, which is then sent to OpenAI ([`gpt-4o-mini`](https://developers.openai.com/api/docs/models/gpt-4o-mini)) to produce a structured **Current Experience JSON** containing skills, work experience, and projects.
 
-**Job Search** — A job title string is used to query the JSearch API (via RapidAPI) for real, recently-posted listings. OpenAI then cleans and normalises the raw results into a structured **Relevant Jobs JSON** array.
+**Job Search** — A job title string is used to query the [`JSearch API`](https://rapidapi.com/letscrape-6bRBa3QguO5/api/jsearch) (via RapidAPI) for real, recently-posted listings. OpenAI then cleans and normalises the raw results into a structured **Relevant Jobs JSON** array using `gpt-4o-mini`.
 
 ---
 
-The three outputs feed into the two-stage AI chain:
+The three outputs feed into the two-stage AI pipeline:
 
-**Skill Gap Analysis** — OpenAI receives the Selected Persona, Current Experience JSON, and Relevant Jobs JSON simultaneously. It returns a **Score** (0–100) and a **gap JSON** listing strengths, gaps, and suggestions — all scoped to hard skills only.
+**Skill Gap Analysis** — `gpt-4o-mini` receives the Selected Persona, Current Experience JSON, and Relevant Jobs JSON simultaneously. It returns a **Score** (0–100) and a **gap JSON** listing strengths, gaps, and suggestions — all scoped to hard skills only.
 
-**Upskill Roadmap Generator** — OpenAI uses the Score and gap JSON to generate a personalised learning plan. Brave Search then enriches each roadmap item with a real resource URL. The final output is a **list of resources to fill the identified gaps, organised by time required** (short-term, medium-term, long-term).
+**Upskill Roadmap Generator** — `gpt-4o-mini` uses the Score and gap JSON to generate a personalised learning plan. [`Brave Search`](https://brave.com/search/api/?mtm_medium=cpc&mtm_campaign=q1-2026-brand) then enriches each roadmap item with a real resource URL. The final output is a **list of resources to fill the identified gaps, organised by time required** (short-term, medium-term, long-term).
 
 ---
 
 **Implementation notes**
 
-- The frontend (Streamlit) and backend (FastAPI) communicate over HTTP. All persistent state lives in `st.session_state`; the backend is fully stateless.
-- FastAPI was chosen over Flask for its native async support, required to fire all Brave Search URL lookups concurrently during roadmap generation.
-- Streamlit was chosen so the entire UI could be written in Python without HTML/CSS/JS, with its session-state model mapping naturally to the wizard-style step flow.
+- The frontend ([`Streamlit`](https://streamlit.io/)) and backend ([`FastAPI`](https://fastapi.tiangolo.com/)) communicate over HTTP. 
+- `FastAPI` was chosen over `Flask` for its native async support, which was leveraged during the `Brave Search` URL lookups during the concurrently during the **Upskill Roadmap Generator**.
+- `Streamlit` was chosen so the entire UI could be written in Python without HTML/CSS/JS.
+- The only state maintained in the application is in the frontend using the `st.session_state` object provided by `Streamlit`. This state maintains the data as the user works through the steps of the application (see details of how it is updated below).
 
 ---
 
@@ -62,10 +63,9 @@ The user uploads a PDF resume. The frontend sends it as a multipart file to `POS
 **What the backend does:**
 
 1. Writes the PDF to a temporary file on disk.
-2. Uses **pdfplumber** to extract raw text from every page.
-3. Sends the extracted text to **gpt-4o-mini** with the resume-parse prompt (see [Exact Prompts](#exact-prompts)).
-4. Parses the JSON from the model response using a regex fallback (`re.search(r'\{.*\}', raw, re.DOTALL)`) to tolerate any markdown fencing the model may add.
-5. Returns structured JSON: `{ projects, work_experience, skills }`.
+2. Uses `pdfplumber` to extract raw text from every page.
+3. Sends the extracted text to `gpt-4o-mini` with the resume-parse prompt (see [Exact Prompts](#exact-prompts)).
+4. Returns structured JSON: `{ projects, work_experience, skills }`.
 
 **What the frontend does:**
 
@@ -81,16 +81,17 @@ The user enters a target job title and selects how many listings to fetch (1–1
 
 **What the backend does:**
 
-1. Calls the **JSearch API** (via RapidAPI) with `date_posted: "week"` so only recent listings appear.
+1. Calls the `JSearch API` with `date_posted: "week"` so only recent listings appear.
 2. For each raw job, `_build_job_text()` assembles a text block containing title, company, description (capped at 3,000 chars), and qualifications pulled from three JSearch fields: `job_highlights.Qualifications`, `job_required_skills`, and `job_required_experience`.
-3. All N job texts are sent to gpt-4o-mini in **a single batch call** (the job-extraction prompt), which returns a JSON array of cleaned job objects.
-4. After the OpenAI call, `company` and `apply_link` are **overwritten from raw JSearch data** rather than taken from the model output. JSearch is the authoritative source for these values; asking the model to copy them introduces unnecessary transcription errors.
+3. All N job texts are sent to `gpt-4o-mini` in **a single batch call** (the job-extraction prompt), which returns a JSON array of cleaned job objects.
+4. After the OpenAI call, `company` and `apply_link` are **overwritten from raw JSearch data** rather than taken from the model output. `JSearch` is the authoritative source for these values; asking the model to copy them introduces unnecessary transcription errors.
 5. If OpenAI extraction fails or returns fewer items than expected, `_fallback_job()` fills the gaps directly from the raw JSearch response.
 
 **What the frontend does:**
 
 - Displays each job in a collapsible expander showing company, description, qualifications list, an **Apply Now** link button, and a **🗑️ Remove** button that calls `st.session_state["jobs"].pop(i)` and reruns the page.
 - Always shows an **Add a job manually** form (inside an expander) so users can paste in a job ad from any source not covered by JSearch.
+- Users can delete any job using the **Delete** button present in each job card.
 - A **View raw jobs JSON** expander lets technical users inspect the full payload.
 
 ---
@@ -122,8 +123,8 @@ Available only after gap analysis has run and found at least one gap. The **Gene
 **What the backend does:**
 
 1. Looks up the persona-specific context string from `PERSONA_ROADMAP_CONTEXTS`.
-2. Sends the roadmap prompt to gpt-4o-mini at `temperature=0.2` (slight creativity allowed for resource suggestions).
-3. For each roadmap item, fires a **Brave Search** query (`"{resource name} {provider}"`) to fetch a real URL. All queries run concurrently via `asyncio.gather` with a `Semaphore(5)` to stay within Brave's rate limits.
+2. Sends the roadmap prompt to `gpt-4o-mini` at `temperature=0.2` (slight creativity allowed for resource suggestions).
+3. For each roadmap item, fires a `Brave Search` query (`"{resource name} {provider}"`) to fetch a real URL. All queries run concurrently via `asyncio.gather` with a `Semaphore(5)` to stay within Brave's rate limits.
 4. Returns the enriched array: `[ { skill, resource, provider, type, cost, time_estimate, timeframe, url } ]`.
 
 **What the frontend does:**
@@ -167,7 +168,7 @@ No persona context is injected. The model applies standard gap analysis and road
 
 ### Resume Parse Prompt (`RESUME_PARSE_PROMPT`)
 
-Sent to gpt-4o-mini at `temperature=0`.
+Sent to `gpt-4o-mini` at `temperature=0`.
 
 ```
 You are a resume parser. Extract the following structured information from the resume text below and return ONLY valid JSON with no markdown or extra text.
@@ -197,7 +198,7 @@ Resume text:
 
 ### Job Extraction Prompt (`JOB_EXTRACT_PROMPT`)
 
-Sent to gpt-4o-mini at `temperature=0`. `{n}` is the number of jobs requested; `{jobs_text}` is all N raw job blocks concatenated.
+Sent to `gpt-4o-mini` at `temperature=0`. `{n}` is the number of jobs requested; `{jobs_text}` is all N raw job blocks concatenated.
 
 ```
 You are a job description parser. Given the list of raw job postings below, extract structured data for ALL of them and return ONLY a valid JSON array with no markdown or extra text.
@@ -226,7 +227,7 @@ Job postings:
 
 ### Gap Analysis Prompt (`GAP_ANALYSIS_PROMPT`)
 
-Sent to gpt-4o-mini at `temperature=0`. `{persona_context}` is the persona string or empty. `{transferable_skills_field}` is either a JSON field snippet (switcher) or empty.
+Sent to `gpt-4o-mini` at `temperature=0`. `{persona_context}` is the persona string or empty. `{transferable_skills_field}` is either a JSON field snippet (switcher) or empty.
 
 ```
 You are a career coach AI. Compare the candidate's resume profile against a set of job descriptions for the role of "{job_title}" and return ONLY valid JSON with no markdown or extra text.
@@ -271,7 +272,7 @@ Job listings:
 
 ### Learning Roadmap Prompt (`ROADMAP_PROMPT`)
 
-Sent to gpt-4o-mini at `temperature=0.2`. `{persona_context}` is the persona string or empty. `{gaps}` is the gap list as a bulleted string.
+Sent to `gpt-4o-mini` at `temperature=0.2`. `{persona_context}` is the persona string or empty. `{gaps}` is the gap list as a bulleted string.
 
 ```
 You are a career coach AI. Based on the skill gaps below for the role of "{job_title}", generate a personalized learning roadmap and return ONLY a valid JSON array with no markdown or extra text.
@@ -317,7 +318,7 @@ Rather than calling OpenAI once per job, all N raw job descriptions are sent in 
 
 ### Company and apply link come from JSearch, not OpenAI
 
-After the batch extraction, `company` and `apply_link` are overwritten with values from the original JSearch data. The model is good at summarising descriptions and consolidating qualifications but is unnecessary for copying a company name or URL verbatim — and introduces transcription errors when asked to do so. Keeping the model focused on what it is good at (synthesis and reformatting) and using the source API for authoritative fields is more reliable.
+After the batch extraction, `company` and `apply_link` are overwritten with values from the original `JSearch` data. The model is good at summarising descriptions and consolidating qualifications but is unnecessary for copying a company name or URL verbatim — and introduces transcription errors when asked to do so. Keeping the model focused on what it is good at (synthesis and reformatting) and using the source API for authoritative fields is more reliable.
 
 ### Hard-skills-only gap analysis
 
@@ -341,11 +342,30 @@ Rather than maintaining different prompts per persona or fine-tuning separate mo
 
 ### Stateless backend
 
-All conversational state (parsed resume, job list, analysis results, roadmap) lives in Streamlit's `st.session_state`, not in the backend. This simplifies the backend to a pure request-response API, allows the frontend to be reloaded without losing the session (state persists until the browser tab is closed), and makes the backend trivially horizontally scalable. The tradeoff is that the state is ephemeral — a browser refresh clears everything.
+All conversational state (parsed resume, job list, analysis results, roadmap) lives in Streamlit's `st.session_state`, not in the backend. This simplifies the backend to a pure request-response API, allows the frontend to be reloaded without losing the session (state persists until the browser tab is closed), and makes the backend trivially horizontally scalable. The tradeoff is that the state is ephemeral — a browser refresh clears everything. Moreover, the user cannot track progress towards getting better for a particular job. 
 
 ### JSearch `date_posted: "week"` filter
 
 Without this filter, JSearch returns a mix of fresh and stale listings, some of which are several months old and may no longer be accepting applications. Filtering to the past week keeps the job cards relevant and the Apply Now links live.
+
+---
+
+## Technologies Used
+
+| Package / Service | Category | How we used it | Why we chose it |
+|---|---|---|---|
+| [FastAPI](https://fastapi.tiangolo.com/) | Framework | Powers the entire backend — exposes REST endpoints for resume parsing, job search, gap analysis, and roadmap generation | Native `async`/`await` support is required to fire all Brave Search URL lookups concurrently; cleaner than Flask for async workloads |
+| [Streamlit](https://streamlit.io/) | Framework | Builds the entire frontend UI as a 4-step wizard with session state, file upload, and interactive form controls | Lets the UI be written entirely in Python without any HTML/CSS/JS; `st.session_state` maps naturally to the step-by-step flow |
+| [Uvicorn](https://www.uvicorn.org/) | Framework | ASGI server that runs the FastAPI app | Standard production-grade server for FastAPI; supports `--reload` for development |
+| [pdfplumber](https://github.com/jsvine/pdfplumber) | Package | Extracts raw text from every page of the uploaded PDF resume before sending it to the model | More reliable text extraction than PyPDF2 on complex resume layouts; returns plain strings with no extra configuration |
+| [httpx](https://www.python-httpx.org/) | Package | Makes async HTTP calls to the JSearch and Brave Search APIs inside FastAPI route handlers | Drop-in async HTTP client; works natively with `asyncio.gather` and FastAPI's event loop |
+| [python-dotenv](https://github.com/theskumar/python-dotenv) | Package | Loads `OPENAI_API_KEY`, `RAPIDAPI_KEY`, and `BRAVE_API_KEY` from the `.env` file at startup | Keeps secrets out of source code with zero boilerplate |
+| [openai](https://github.com/openai/openai-python) | Package | Sends all prompts (resume parse, job extraction, gap analysis, roadmap) to the OpenAI Chat Completions API | Official SDK; handles auth, retries, and response parsing |
+| [fpdf2](https://py-fpdf2.readthedocs.io/) | Package | Generates the demo resume PDFs (`generate_resumes.py`) | Lightweight pure-Python PDF writer; no external dependencies required to produce simple formatted documents |
+| [gpt-4o-mini](https://platform.openai.com/docs/models/gpt-4o-mini) | Model | Runs all four AI tasks: resume parsing, job extraction, gap analysis, and roadmap generation | Strong instruction-following at low cost and low latency; `temperature=0` gives deterministic structured JSON outputs |
+| [JSearch API](https://rapidapi.com/letscrape-6bRBa3QguO5/api/jsearch) | API | Fetches real, recently-posted job listings by title via RapidAPI | Provides structured job data including description, qualifications, company, and an apply link without scraping |
+| [Brave Search API](https://brave.com/search/api/) | API | Enriches each roadmap item with a real resource URL by querying `"{resource name} {provider}"` | Independent index returns fresh, unfiltered results; generous free tier; suitable for programmatic lookups |
+| [OpenAI Platform](https://platform.openai.com/) | API | Hosts the gpt-4o-mini model accessed via the `openai` Python SDK | Reliable, well-documented API with predictable JSON output at `temperature=0` |
 
 ---
 

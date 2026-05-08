@@ -1,6 +1,6 @@
 # Skill-Bridge Career Navigator
 
-An AI-powered career tool that takes a PDF resume, finds real job listings, analyses skill gaps, and generates a personalised learning roadmap with real resource URLs.
+An AI-powered career tool that finds real job listings, parses a PDF resume, analyses skill gaps against those listings, and generates a personalised learning roadmap with verified resource URLs — all persisted per-user via Firebase Firestore and secured with Google OAuth 2.0.
 
 🎥 Video Presentation *(link coming soon)*
 
@@ -11,29 +11,28 @@ An AI-powered career tool that takes a PDF resume, finds real job listings, anal
 ## Table of Contents
 
 1. [Architecture Overview](#architecture-overview)
-2. [How the Application Works](#how-the-application-works)
-   - [Step 1 – Resume Upload & Parsing](#step-1--resume-upload--parsing)
-   - [Step 2 – Job Search](#step-2--job-search)
+2. [Authentication & Persistence Layer](#authentication--persistence-layer)
+3. [How the Application Works](#how-the-application-works)
+   - [Step 1 – Job Search](#step-1--job-search)
+   - [Step 2 – Resume Upload & Parsing](#step-2--resume-upload--parsing)
    - [Step 3 – Gap Analysis](#step-3--gap-analysis)
    - [Step 4 – Learning Roadmap](#step-4--learning-roadmap)
-3. [Persona System](#persona-system)
-4. [Exact Prompts](#exact-prompts)
-5. [Design Decisions & Tradeoffs](#design-decisions--tradeoffs)
-6. [Getting Started on a New Machine](#getting-started-on-a-new-machine)
+4. [Persona System](#persona-system)
+5. [Exact Prompts](#exact-prompts)
+6. [Design Decisions & Tradeoffs](#design-decisions--tradeoffs)
+7. [Getting Started on a New Machine](#getting-started-on-a-new-machine)
 
 ---
 
 ## Architecture Overview
 
-![Architecture](architecture.jpg)
-
 The pipeline has three parallel inputs that converge into a two-stage AI processing pipeline:
 
-**Persona Selection** — The user picks a persona (Recent Grad or Career Switcher) before running any analysis. The selected persona flows as a context modifier into both the Skill Gap Analysis and the Upskill Roadmap Generator, shaping how results are weighted and presented. A General option is also available which skips the persona context modification
-
-**Resume Parsing** — A PDF resume is fed through [`pdfplumber`](https://github.com/jsvine/pdfplumber) to extract raw text, which is then sent to OpenAI ([`gpt-4o-mini`](https://developers.openai.com/api/docs/models/gpt-4o-mini)) to produce a structured **Current Experience JSON** containing skills, work experience, and projects.
+**Persona Selection** — The user picks a persona (Recent Grad or Career Switcher) before running any analysis. The selected persona flows as a context modifier into both the Skill Gap Analysis and the Upskill Roadmap Generator, shaping how results are weighted and presented. A General option is also available which skips the persona context modification.
 
 **Job Search** — A job title string is used to query the [`JSearch API`](https://rapidapi.com/letscrape-6bRBa3QguO5/api/jsearch) (via RapidAPI) for real, recently-posted listings. OpenAI then cleans and normalises the raw results into a structured **Relevant Jobs JSON** array using `gpt-4o-mini`.
+
+**Resume Parsing** — A PDF resume is fed through [`pdfplumber`](https://github.com/jsvine/pdfplumber) to extract raw text, which is then sent to OpenAI ([`gpt-4o-mini`](https://developers.openai.com/api/docs/models/gpt-4o-mini)) to produce a structured **Current Experience JSON** containing skills, work experience, and projects.
 
 ---
 
@@ -41,22 +40,88 @@ The three outputs feed into the two-stage AI pipeline:
 
 **Skill Gap Analysis** — `gpt-4o-mini` receives the Selected Persona, Current Experience JSON, and Relevant Jobs JSON simultaneously. It returns a **Score** (0–100) and a **gap JSON** listing strengths, gaps, and suggestions — all scoped to hard skills only.
 
-**Upskill Roadmap Generator** — `gpt-4o-mini` uses the Score and gap JSON to generate a personalised learning plan. [`Brave Search`](https://brave.com/search/api/?mtm_medium=cpc&mtm_campaign=q1-2026-brand) then enriches each roadmap item with a real resource URL. The final output is a **list of resources to fill the identified gaps, organised by time required** (short-term, medium-term, long-term).
+**Upskill Roadmap Generator** — `gpt-4o-mini` uses the Score and gap JSON to generate a personalised learning plan. [`Brave Search`](https://brave.com/search/api/) then enriches each roadmap item with a real resource URL. The final output is a **list of resources to fill the identified gaps, organised by time required** (short-term, medium-term, long-term).
 
 ---
 
 **Implementation notes**
 
-- The frontend ([`Streamlit`](https://streamlit.io/)) and backend ([`FastAPI`](https://fastapi.tiangolo.com/)) communicate over HTTP. 
-- `FastAPI` was chosen over `Flask` for its native async support, which was leveraged during the `Brave Search` URL lookups during the concurrently during the **Upskill Roadmap Generator**.
+- The frontend ([`Streamlit`](https://streamlit.io/)) and backend ([`FastAPI`](https://fastapi.tiangolo.com/)) communicate over HTTP.
+- `FastAPI` was chosen over `Flask` for its native async support, which is leveraged during the `Brave Search` URL lookups running concurrently inside the **Upskill Roadmap Generator**.
 - `Streamlit` was chosen so the entire UI could be written in Python without HTML/CSS/JS.
-- The only state maintained in the application is in the frontend using the `st.session_state` object provided by `Streamlit`. This state maintains the data as the user works through the steps of the application (see details of how it is updated below).
+- In-flight wizard state is maintained in `st.session_state`. All completed steps are persisted to Firebase Firestore (when authenticated) so users can return to past searches without re-running the pipeline.
+
+---
+
+## Authentication & Persistence Layer
+
+### Google OAuth 2.0 (`backend/auth.py`)
+
+Authentication uses a standard server-side OAuth 2.0 authorization code flow — no client-side JS libraries involved.
+
+**Flow:**
+
+1. Browser navigates to `GET /auth/google`.
+2. Backend generates a cryptographically random `state` token (stored in an in-memory dict for CSRF validation), builds the Google consent URL, and issues a `302` redirect to Google.
+3. After the user authenticates, Google redirects to `GET /auth/callback?code=…&state=…`.
+4. Backend validates the `state` token (one-time use, deleted after check), exchanges the `code` for a Google access token, fetches user info from Google's `/oauth2/v3/userinfo` endpoint, and upserts a `users/{uid}` document in Firestore.
+5. Backend signs an **HS256 JWT** (7-day expiry, `python-jose`) containing `{uid, email, name, photo_url}` and issues a `302` redirect to the Streamlit URL with `?token=<jwt>` appended.
+6. Streamlit reads the `token` query param on load, calls `GET /auth/me` to validate it, and stores the decoded user in `st.session_state`.
+
+Protected routes use a `get_current_user` FastAPI dependency that reads the `Authorization: Bearer <token>` header and raises `HTTP 401` on invalid or expired tokens. An `get_optional_user` variant returns `None` instead of raising, used by AI routes that work both authenticated and unauthenticated.
+
+### Firestore Persistence (`backend/firestore_db.py`)
+
+All Firestore operations are synchronous at the SDK level (firebase-admin uses gRPC). They are wrapped in `asyncio.to_thread` calls to avoid blocking FastAPI's event loop.
+
+**Document schema:**
+
+```
+users/{uid}
+  ├── searches/{search_id}           # job_title, score, created_at, updated_at
+  │     ├── jobs/{job_id}            # cleaned job objects
+  │     ├── resume (id="data")       # parsed resume JSON
+  │     ├── analysis (id="data")     # gap analysis result + score
+  │     └── roadmap/{item_id}        # roadmap items with completed flag
+```
+
+**Key design choices:**
+
+- **Upsert on login:** `upsert_user` creates the `users/{uid}` doc on first login and updates only mutable profile fields (name, photo) on subsequent logins, preserving `created_at`.
+- **Score denormalisation:** The gap analysis score is written to both `analysis/data` (full result) and the parent `searches/{search_id}` document. This allows the dashboard to display scores across all past searches with a single collection query rather than N subcollection fetches.
+- **Roadmap completion state preservation:** `save_roadmap` merges new roadmap items against any existing `completed=True` flags in the database, so re-generating the roadmap doesn't reset progress on items the user has already checked off.
+- **Lazy Firebase init:** `_get_db()` initialises the Firebase Admin SDK on first call. It prefers a local `firebase_service_account.json` file and falls back to Application Default Credentials for cloud deployments (e.g. Cloud Run).
+
+### Dashboard
+
+When a user logs in they land on a dashboard listing all their past searches ordered by `updated_at` descending. Each search card shows the job title, timestamp, and a colour-coded score badge (green ≥ 90, orange ≥ 60, red < 60). Clicking a search restores it as the active session — the wizard re-hydrates `st.session_state` from Firestore before rendering.
 
 ---
 
 ## How the Application Works
 
-### Step 1 – Resume Upload & Parsing
+### Step 1 – Job Search
+
+The user enters a target job title and selects how many listings to fetch (1–10). The frontend calls `POST /fetch_jobs?job_title=...&n=...`. A `search_id` is created in Firestore at this point if the user is authenticated.
+
+**What the backend does:**
+
+1. Calls the `JSearch API` with `date_posted: "week"` so only recent listings appear.
+2. For each raw job, `_build_job_text()` assembles a text block containing title, company, description (capped at 3,000 chars), and qualifications pulled from three JSearch fields: `job_highlights.Qualifications`, `job_required_skills`, and `job_required_experience`.
+3. All N job texts are sent to `gpt-4o-mini` in **a single batch call** (the job-extraction prompt), which returns a JSON array of cleaned job objects.
+4. After the OpenAI call, `company` and `apply_link` are **overwritten from raw JSearch data** rather than taken from the model output. `JSearch` is the authoritative source for these values; asking the model to copy them introduces unnecessary transcription errors.
+5. If OpenAI extraction fails or returns fewer items than expected, `_fallback_job()` fills the gaps directly from the raw JSearch response.
+6. If the request includes a valid `Authorization` header and a `search_id`, the cleaned jobs are saved to `users/{uid}/searches/{search_id}/jobs/`.
+
+**What the frontend does:**
+
+- Displays each job in a collapsible expander showing company, description, qualifications list, an **Apply Now** link button, and a **🗑️ Remove** button that calls `st.session_state["jobs"].pop(i)` and reruns the page.
+- Always shows an **Add a job manually** form so users can paste in a job ad from any source not covered by JSearch.
+- A **View raw jobs JSON** expander lets technical users inspect the full payload.
+
+---
+
+### Step 2 – Resume Upload & Parsing
 
 The user uploads a PDF resume. The frontend sends it as a multipart file to `POST /parse_resume`.
 
@@ -66,33 +131,13 @@ The user uploads a PDF resume. The frontend sends it as a multipart file to `POS
 2. Uses `pdfplumber` to extract raw text from every page.
 3. Sends the extracted text to `gpt-4o-mini` with the resume-parse prompt (see [Exact Prompts](#exact-prompts)).
 4. Returns structured JSON: `{ projects, work_experience, skills }`.
+5. If authenticated with a `search_id`, saves the result to `users/{uid}/searches/{search_id}/resume`.
 
 **What the frontend does:**
 
 - Caches the result in `st.session_state["parsed_resume"]` keyed by filename so re-uploading the same file is a no-op.
 - Renders editable form fields for every section (skills text area, per-entry expanders for work experience and projects) so the user can correct any parsing errors before proceeding.
-- A **Save Edits** button writes the corrected data back to session state.
-
----
-
-### Step 2 – Job Search
-
-The user enters a target job title and selects how many listings to fetch (1–10). The frontend calls `POST /fetch_jobs?job_title=...&n=...`.
-
-**What the backend does:**
-
-1. Calls the `JSearch API` with `date_posted: "week"` so only recent listings appear.
-2. For each raw job, `_build_job_text()` assembles a text block containing title, company, description (capped at 3,000 chars), and qualifications pulled from three JSearch fields: `job_highlights.Qualifications`, `job_required_skills`, and `job_required_experience`.
-3. All N job texts are sent to `gpt-4o-mini` in **a single batch call** (the job-extraction prompt), which returns a JSON array of cleaned job objects.
-4. After the OpenAI call, `company` and `apply_link` are **overwritten from raw JSearch data** rather than taken from the model output. `JSearch` is the authoritative source for these values; asking the model to copy them introduces unnecessary transcription errors.
-5. If OpenAI extraction fails or returns fewer items than expected, `_fallback_job()` fills the gaps directly from the raw JSearch response.
-
-**What the frontend does:**
-
-- Displays each job in a collapsible expander showing company, description, qualifications list, an **Apply Now** link button, and a **🗑️ Remove** button that calls `st.session_state["jobs"].pop(i)` and reruns the page.
-- Always shows an **Add a job manually** form (inside an expander) so users can paste in a job ad from any source not covered by JSearch.
-- Users can delete any job using the **Delete** button present in each job card.
-- A **View raw jobs JSON** expander lets technical users inspect the full payload.
+- A **Save Edits** button writes the corrected data back to session state and pushes the update to Firestore.
 
 ---
 
@@ -104,12 +149,13 @@ Once a resume and at least one job are present, the **Analyse My Profile** butto
 
 1. Looks up the persona-specific context string from `PERSONA_GAP_CONTEXTS` (empty string for `"general"`).
 2. For the `"switcher"` persona, injects an extra JSON field instruction (`"transferable_skills"`) into the prompt so the model returns that section.
-3. Sends the assembled prompt to gpt-4o-mini at `temperature=0` for deterministic results.
+3. Sends the assembled prompt to `gpt-4o-mini` at `temperature=0` for deterministic results.
 4. Returns: `{ score, summary, strengths, gaps, suggestions }` plus optionally `transferable_skills`.
+5. If authenticated, saves the full result to `users/{uid}/searches/{search_id}/analysis` and denormalises the score up to the parent `searches/{search_id}` document.
 
 **What the frontend does:**
 
-- Renders the score as a large colour-coded number (green ≥ 70, orange ≥ 40, red < 40) with a progress bar.
+- Renders the score as a large colour-coded number (green ≥ 90, orange ≥ 60, red < 60) with a progress bar.
 - Displays summary text, then strengths and gaps in two side-by-side columns.
 - Shows the **🔄 Transferable Skills** section only when the `"switcher"` persona is active and the model returned that field.
 - Suggestions appear below as a bulleted action list.
@@ -126,13 +172,15 @@ Available only after gap analysis has run and found at least one gap. The **Gene
 2. Sends the roadmap prompt to `gpt-4o-mini` at `temperature=0.2` (slight creativity allowed for resource suggestions).
 3. For each roadmap item, fires a `Brave Search` query (`"{resource name} {provider}"`) to fetch a real URL. All queries run concurrently via `asyncio.gather` with a `Semaphore(5)` to stay within Brave's rate limits.
 4. Returns the enriched array: `[ { skill, resource, provider, type, cost, time_estimate, timeframe, url } ]`.
+5. If authenticated, saves the roadmap to `users/{uid}/searches/{search_id}/roadmap/`, merging against any existing completion state.
 
 **What the frontend does:**
 
 - Groups items into three timeframe buckets: ⚡ Short-term (≤ 1 week), 📅 Medium-term (1–4 weeks), 🏗️ Long-term (1+ month).
 - Each card shows a type icon (📚 course, 🔨 project, 🏅 certification), provider, time estimate, and cost badge.
 - A **🔗 Open Resource** link points to the real URL retrieved by Brave Search.
-- When the `"graduate"` persona is active, certification items get a **🎓 Cert Pick** badge to highlight their particular value for candidates with limited work history.
+- Each item has a checkbox; toggling it calls `PATCH /searches/{search_id}/roadmap/{item_id}` which flips the `completed` flag in Firestore. Progress persists across sessions.
+- When the `"graduate"` persona is active, certification items get a **🎓 Cert Pick** badge.
 
 ---
 
@@ -340,9 +388,17 @@ Roadmap generation can produce 10–20 items, each requiring a URL lookup. Runni
 
 Rather than maintaining different prompts per persona or fine-tuning separate models, persona behaviour is implemented as a short paragraph prepended to the existing prompt. This is sufficient for the three distinct behaviours needed (standard, graduate-friendly, switcher-friendly) and requires no additional API keys or model deployments. The tradeoff is that the persona context competes for attention with the rest of the prompt — for more nuanced personas or stricter behavioural constraints, a separate system prompt or dedicated fine-tune would be the next step.
 
-### Stateless backend
+### Server-side OAuth rather than a client-side library
 
-All conversational state (parsed resume, job list, analysis results, roadmap) lives in Streamlit's `st.session_state`, not in the backend. This simplifies the backend to a pure request-response API, allows the frontend to be reloaded without losing the session (state persists until the browser tab is closed), and makes the backend trivially horizontally scalable. The tradeoff is that the state is ephemeral — a browser refresh clears everything. Moreover, the user cannot track progress towards getting better for a particular job. 
+The Google OAuth flow runs entirely in the FastAPI backend (redirect → code exchange → JWT issuance). This avoids shipping any Google OAuth JS SDK to the Streamlit frontend and keeps credentials server-side only. The Streamlit client receives a single short-lived opaque JWT; it never sees the Google access token.
+
+### Roadmap completion state merge
+
+When a user re-generates the roadmap (e.g. after editing their resume), `save_roadmap` fetches existing roadmap docs first and preserves any `completed=True` flags on items that share the same `skill` name. This prevents the frustrating UX of losing progress on checked-off items just because the roadmap was regenerated.
+
+### Job Search before Resume Upload
+
+The wizard flow was changed from Resume → Jobs to Jobs → Resume. Job search is fast (seconds), while resume upload requires the user to have a PDF on hand. Starting with job search lets users see relevant listings immediately and understand the role landscape before deciding which resume to upload — reducing drop-off at the first step.
 
 ### JSearch `date_posted: "week"` filter
 
@@ -354,17 +410,22 @@ Without this filter, JSearch returns a mix of fresh and stale listings, some of 
 
 | Package / Service | Category | How we used it | Why we chose it |
 |---|---|---|---|
-| [FastAPI](https://fastapi.tiangolo.com/) | Framework | Powers the entire backend — exposes REST endpoints for resume parsing, job search, gap analysis, and roadmap generation | Native `async`/`await` support is required to fire all Brave Search URL lookups concurrently; cleaner than Flask for async workloads |
-| [Streamlit](https://streamlit.io/) | Framework | Builds the entire frontend UI as a 4-step wizard with session state, file upload, and interactive form controls | Lets the UI be written entirely in Python without any HTML/CSS/JS; `st.session_state` maps naturally to the step-by-step flow |
+| [FastAPI](https://fastapi.tiangolo.com/) | Framework | Powers the entire backend — exposes REST endpoints for auth, resume parsing, job search, gap analysis, roadmap generation, and search CRUD | Native `async`/`await` is required for concurrent Brave Search lookups and non-blocking Firestore writes; cleaner than Flask for async workloads |
+| [Streamlit](https://streamlit.io/) | Framework | Builds the entire frontend UI as a 4-step wizard with session state, file upload, interactive form controls, and a search dashboard | Lets the UI be written entirely in Python without any HTML/CSS/JS; `st.session_state` maps naturally to the step-by-step flow |
 | [Uvicorn](https://www.uvicorn.org/) | Framework | ASGI server that runs the FastAPI app | Standard production-grade server for FastAPI; supports `--reload` for development |
+| [Firebase Admin SDK](https://firebase.google.com/docs/admin/setup) | Package | Reads and writes all user, search, job, resume, analysis, and roadmap data to Cloud Firestore | Official server-side SDK; no additional auth setup needed when using a service account; gRPC transport is fast for structured document writes |
+| [python-jose](https://github.com/mpdavis/python-jose) | Package | Signs and verifies HS256 JWTs for user sessions | Lightweight, well-tested JWT library; no external service required for token issuance |
+| [google-auth-oauthlib](https://github.com/googleapis/google-auth-library-python-oauthlib) | Package | Assists with OAuth 2.0 scope validation | Provides Google-specific scope constants without pulling in a heavier client library |
 | [pdfplumber](https://github.com/jsvine/pdfplumber) | Package | Extracts raw text from every page of the uploaded PDF resume before sending it to the model | More reliable text extraction than PyPDF2 on complex resume layouts; returns plain strings with no extra configuration |
-| [httpx](https://www.python-httpx.org/) | Package | Makes async HTTP calls to the JSearch and Brave Search APIs inside FastAPI route handlers | Drop-in async HTTP client; works natively with `asyncio.gather` and FastAPI's event loop |
-| [python-dotenv](https://github.com/theskumar/python-dotenv) | Package | Loads `OPENAI_API_KEY`, `RAPIDAPI_KEY`, and `BRAVE_API_KEY` from the `.env` file at startup | Keeps secrets out of source code with zero boilerplate |
+| [httpx](https://www.python-httpx.org/) | Package | Makes async HTTP calls to Google OAuth endpoints, the JSearch API, and Brave Search inside FastAPI route handlers | Drop-in async HTTP client; works natively with `asyncio.gather` and FastAPI's event loop |
+| [python-dotenv](https://github.com/theskumar/python-dotenv) | Package | Loads all secrets from the `.env` file at startup | Keeps credentials out of source code with zero boilerplate |
 | [openai](https://github.com/openai/openai-python) | Package | Sends all prompts (resume parse, job extraction, gap analysis, roadmap) to the OpenAI Chat Completions API | Official SDK; handles auth, retries, and response parsing |
 | [fpdf2](https://py-fpdf2.readthedocs.io/) | Package | Generates the demo resume PDFs (`generate_resumes.py`) | Lightweight pure-Python PDF writer; no external dependencies required to produce simple formatted documents |
 | [gpt-4o-mini](https://platform.openai.com/docs/models/gpt-4o-mini) | Model | Runs all four AI tasks: resume parsing, job extraction, gap analysis, and roadmap generation | Strong instruction-following at low cost and low latency; `temperature=0` gives deterministic structured JSON outputs |
 | [JSearch API](https://rapidapi.com/letscrape-6bRBa3QguO5/api/jsearch) | API | Fetches real, recently-posted job listings by title via RapidAPI | Provides structured job data including description, qualifications, company, and an apply link without scraping |
 | [Brave Search API](https://brave.com/search/api/) | API | Enriches each roadmap item with a real resource URL by querying `"{resource name} {provider}"` | Independent index returns fresh, unfiltered results; generous free tier; suitable for programmatic lookups |
+| [Google OAuth 2.0](https://developers.google.com/identity/protocols/oauth2) | API | Authenticates users via their Google account | No password management required; users already have Google accounts; consent screen provides a clear trust boundary |
+| [Firebase Firestore](https://firebase.google.com/docs/firestore) | API | Stores all user data, search history, and AI results durably | Serverless NoSQL with a generous free tier; subcollection schema maps naturally to the search → jobs/resume/analysis/roadmap hierarchy |
 | [OpenAI Platform](https://platform.openai.com/) | API | Hosts the gpt-4o-mini model accessed via the `openai` Python SDK | Reliable, well-documented API with predictable JSON output at `temperature=0` |
 
 ---
@@ -375,10 +436,12 @@ Without this filter, JSearch returns a mix of fresh and stale listings, some of 
 
 - Python 3.10+
 - A terminal (macOS/Linux) or WSL (Windows)
-- API keys for:
+- API keys / credentials for:
   - [OpenAI](https://platform.openai.com/) (`OPENAI_API_KEY`)
   - [RapidAPI / JSearch](https://rapidapi.com/letscrape-6bRBa3QguO5/api/jsearch) (`RAPIDAPI_KEY`)
   - [Brave Search API](https://api.search.brave.com/) (`BRAVE_API_KEY`)
+  - [Google OAuth 2.0](https://console.cloud.google.com/) — Web application credentials with `http://localhost:8000/auth/callback` as an authorised redirect URI (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`)
+  - [Firebase](https://console.firebase.google.com/) — A Firestore database (Native mode) and a service account JSON key (`FIREBASE_PROJECT_ID`, `firebase_service_account.json`)
 
 ### 1. Clone the repository
 
@@ -398,10 +461,21 @@ source venv/bin/activate      # macOS / Linux
 ### 3. Install dependencies
 
 ```bash
-pip install fastapi uvicorn[standard] streamlit openai pdfplumber httpx python-dotenv fpdf2
+pip install fastapi uvicorn[standard] streamlit openai pdfplumber httpx python-dotenv fpdf2 \
+            firebase-admin google-auth-oauthlib "python-jose[cryptography]"
 ```
 
-### 4. Configure environment variables
+### 4. Place the Firebase service account key
+
+Download the JSON key from **Firebase Console → Project Settings → Service Accounts → Generate new private key** and save it as:
+
+```
+skillbridge/firebase_service_account.json
+```
+
+This file is listed in `.gitignore` and must never be committed.
+
+### 5. Configure environment variables
 
 Create a `.env` file in the project root:
 
@@ -410,12 +484,18 @@ cat > .env << 'EOF'
 OPENAI_API_KEY=sk-...
 RAPIDAPI_KEY=...
 BRAVE_API_KEY=...
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+FIREBASE_PROJECT_ID=...
+JWT_SECRET=<output of: python -c "import secrets; print(secrets.token_hex(32))">
+STREAMLIT_URL=http://localhost:8501
+BACKEND_URL=http://localhost:8000
 EOF
 ```
 
 Never commit `.env` to version control.
 
-### 5. (Optional) Generate demo resume PDFs
+### 6. (Optional) Generate demo resume PDFs
 
 ```bash
 python generate_resumes.py
@@ -423,7 +503,7 @@ python generate_resumes.py
 
 This creates `demo/jamie_park_resume.pdf` (recent graduate) and `demo/rachel_okonkwo_resume.pdf` (career switcher).
 
-### 6. Start the backend
+### 7. Start the backend
 
 In one terminal:
 
@@ -433,7 +513,7 @@ uvicorn backend.main:app --reload
 
 The API will be available at `http://localhost:8000`. The `--reload` flag restarts the server on file changes.
 
-### 7. Start the frontend
+### 8. Start the frontend
 
 In a second terminal (with the virtualenv active):
 
@@ -443,12 +523,18 @@ streamlit run frontend/streamlit_app.py
 
 Streamlit will open `http://localhost:8501` in your browser automatically.
 
-### 8. Demo walkthrough
+### 9. Sign in
+
+Navigate to `http://localhost:8501`. Click **Sign in with Google** and authenticate with an account that has been added as a test user in the Google OAuth consent screen (**Google Cloud Console → APIs & Services → OAuth consent screen → Test users**).
+
+After consent, Google redirects to `http://localhost:8000/auth/callback`, which issues a JWT and redirects back to Streamlit. You will land on the search dashboard.
+
+### 10. Demo walkthrough
 
 | Step | Action | Recommended file / setting |
 |------|--------|---------------------------|
-| 1 | Upload resume PDF | `demo/jamie_park_resume.pdf` with **🎓 Recent Graduate** persona, or `demo/rachel_okonkwo_resume.pdf` with **🔄 Career Switcher** persona |
-| 2 | Search for jobs | "Data Scientist" or "Machine Learning Engineer", 3–5 listings |
+| 1 | Search for jobs | "Data Scientist" or "Machine Learning Engineer", 3–5 listings |
+| 2 | Upload resume PDF | `demo/jamie_park_resume.pdf` with **🎓 Recent Graduate** persona, or `demo/rachel_okonkwo_resume.pdf` with **🔄 Career Switcher** persona |
 | 3 | Run gap analysis | Click **Analyse My Profile** |
 | 4 | Generate roadmap | Click **Generate Learning Roadmap** |
 
@@ -457,14 +543,18 @@ Streamlit will open `http://localhost:8501` in your browser automatically.
 ```
 skillbridge/
 ├── backend/
-│   └── main.py              # FastAPI app — all AI and external API logic
+│   ├── main.py              # FastAPI app — all routes (auth, AI, search CRUD)
+│   ├── auth.py              # Google OAuth flow + JWT helpers + FastAPI dependencies
+│   └── firestore_db.py      # All Firestore read/write helpers
 ├── frontend/
-│   └── streamlit_app.py     # Streamlit UI — 4-step wizard
+│   └── streamlit_app.py     # Streamlit UI — login, dashboard, 4-step wizard
 ├── demo/
 │   ├── jamie_park_resume.pdf
 │   └── rachel_okonkwo_resume.pdf
 ├── generate_resumes.py      # Script to regenerate demo PDFs
 ├── logo.png                 # App logo (displayed in sidebar)
-├── .env                     # API keys (not committed)
+├── firebase_service_account.json  # Firebase credentials (not committed)
+├── .env                     # API keys and secrets (not committed)
 └── README.md
 ```
+

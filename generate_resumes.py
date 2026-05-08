@@ -9,7 +9,7 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "fpdf2"])
     from fpdf import FPDF
 
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "demo")
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "demo-data")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
@@ -64,7 +64,7 @@ def build_jamie():
 
     pdf.name_block(
         "Jamie Park",
-        "jamie.park@email.com  |  (734) 555-0192  |  linkedin.com/in/jamiepark  |  github.com/jamiepark",
+        "jamiepark359@gmail.com  |  (734) 555-0192  |  linkedin.com/in/jamiepark  |  github.com/jamiepark",
     )
 
     # Education

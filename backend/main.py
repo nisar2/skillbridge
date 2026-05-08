@@ -1,7 +1,8 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from typing import Optional
 import tempfile
 import os
 import json
@@ -12,6 +13,26 @@ import httpx
 import pdfplumber
 from openai import OpenAI
 from dotenv import load_dotenv
+
+from backend.auth import (
+    get_current_user,
+    get_optional_user,
+    build_google_auth_redirect,
+    handle_google_callback,
+)
+from backend.firestore_db import (
+    get_user_searches,
+    create_search,
+    save_jobs,
+    get_jobs,
+    save_resume,
+    get_resume,
+    save_analysis,
+    get_analysis,
+    save_roadmap,
+    get_roadmap,
+    toggle_roadmap_item,
+)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -29,6 +50,119 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# Auth routes
+# ---------------------------------------------------------------------------
+
+@app.get("/auth/google")
+async def google_login():
+    return build_google_auth_redirect()
+
+
+@app.get("/auth/callback")
+async def google_callback(code: str, state: str):
+    return await handle_google_callback(code, state)
+
+
+@app.get("/auth/me")
+async def get_me(current_user: dict = Depends(get_current_user)):
+    return JSONResponse(content=current_user)
+
+
+# ---------------------------------------------------------------------------
+# Search CRUD routes
+# ---------------------------------------------------------------------------
+
+class CreateSearchRequest(BaseModel):
+    job_title: str
+
+
+@app.get("/searches")
+async def list_searches(current_user: dict = Depends(get_current_user)):
+    searches = await get_user_searches(current_user["uid"])
+    return JSONResponse(content=searches)
+
+
+@app.post("/searches")
+async def create_search_route(
+    body: CreateSearchRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    search_id = await create_search(current_user["uid"], body.job_title)
+    return JSONResponse(content={"search_id": search_id, "job_title": body.job_title})
+
+
+@app.get("/searches/{search_id}/jobs")
+async def get_search_jobs(search_id: str, current_user: dict = Depends(get_current_user)):
+    jobs = await get_jobs(current_user["uid"], search_id)
+    return JSONResponse(content=jobs)
+
+
+@app.get("/searches/{search_id}/resume")
+async def get_search_resume(search_id: str, current_user: dict = Depends(get_current_user)):
+    resume = await get_resume(current_user["uid"], search_id)
+    if resume is None:
+        raise HTTPException(status_code=404, detail="No resume saved for this search.")
+    return JSONResponse(content=resume)
+
+
+@app.get("/searches/{search_id}/analysis")
+async def get_search_analysis(search_id: str, current_user: dict = Depends(get_current_user)):
+    analysis = await get_analysis(current_user["uid"], search_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="No analysis saved for this search.")
+    return JSONResponse(content=analysis)
+
+
+@app.get("/searches/{search_id}/roadmap")
+async def get_search_roadmap(search_id: str, current_user: dict = Depends(get_current_user)):
+    roadmap = await get_roadmap(current_user["uid"], search_id)
+    return JSONResponse(content=roadmap)
+
+
+class ToggleRoadmapItemRequest(BaseModel):
+    completed: bool
+
+
+@app.patch("/searches/{search_id}/roadmap/{item_id}")
+async def patch_roadmap_item(
+    search_id: str,
+    item_id: str,
+    body: ToggleRoadmapItemRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    await toggle_roadmap_item(current_user["uid"], search_id, item_id, body.completed)
+    return JSONResponse(content={"ok": True})
+
+
+class SaveJobsRequest(BaseModel):
+    jobs: list
+
+
+@app.put("/searches/{search_id}/jobs")
+async def put_search_jobs(
+    search_id: str,
+    body: SaveJobsRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    await save_jobs(current_user["uid"], search_id, body.jobs)
+    return JSONResponse(content={"ok": True})
+
+
+class SaveResumeRequest(BaseModel):
+    resume: dict
+
+
+@app.put("/searches/{search_id}/resume")
+async def put_search_resume(
+    search_id: str,
+    body: SaveResumeRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    await save_resume(current_user["uid"], search_id, body.resume)
+    return JSONResponse(content={"ok": True})
+
 
 RESUME_PARSE_PROMPT = """
 You are a resume parser. Extract the following structured information from the resume text below and return ONLY valid JSON with no markdown or extra text.
@@ -55,7 +189,11 @@ Resume text:
 """
 
 @app.post("/parse_resume")
-async def parse_resume(file: UploadFile = File(...)):
+async def parse_resume(
+    file: UploadFile = File(...),
+    search_id: Optional[str] = Query(None),
+    user: Optional[dict] = Depends(get_optional_user),
+):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
@@ -104,6 +242,9 @@ async def parse_resume(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         os.remove(tmp_path)
+
+    if user and search_id:
+        await save_resume(user["uid"], search_id, parsed)
 
     return JSONResponse(content=parsed)
 
@@ -174,6 +315,8 @@ def _fallback_job(job: dict) -> dict:
 async def fetch_jobs(
     job_title: str = Query(..., description="Job title to search for"),
     n: int = Query(2, ge=1, le=10, description="Number of job listings to fetch"),
+    search_id: Optional[str] = Query(None),
+    user: Optional[dict] = Depends(get_optional_user),
 ):
     rapidapi_key = os.getenv("RAPIDAPI_KEY")
     if not rapidapi_key:
@@ -233,6 +376,9 @@ async def fetch_jobs(
         if i < len(raw_jobs):
             job["company"] = raw_jobs[i].get("employer_name", "")
             job["apply_link"] = raw_jobs[i].get("job_apply_link") or raw_jobs[i].get("job_google_link", "")
+
+    if user and search_id:
+        await save_jobs(user["uid"], search_id, structured_jobs)
 
     return JSONResponse(content=structured_jobs)
 
@@ -306,10 +452,11 @@ class GapAnalysisRequest(BaseModel):
     jobs: list
     job_title: str
     persona: str = "general"
+    search_id: Optional[str] = None
 
 
 @app.post("/gap_analysis")
-async def gap_analysis(request: GapAnalysisRequest):
+async def gap_analysis(request: GapAnalysisRequest, user: Optional[dict] = Depends(get_optional_user)):
     persona = request.persona or "general"
     persona_context = PERSONA_GAP_CONTEXTS.get(persona, "")
     transferable_skills_field = (
@@ -339,6 +486,9 @@ async def gap_analysis(request: GapAnalysisRequest):
     except Exception as e:
         logging.error("Gap analysis error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+    if user and request.search_id:
+        await save_analysis(user["uid"], request.search_id, {**result, "persona": request.persona})
 
     return JSONResponse(content=result)
 
@@ -382,10 +532,11 @@ class RoadmapRequest(BaseModel):
     gaps: list
     job_title: str
     persona: str = "general"
+    search_id: Optional[str] = None
 
 
 @app.post("/learning_roadmap")
-async def learning_roadmap(request: RoadmapRequest):
+async def learning_roadmap(request: RoadmapRequest, user: Optional[dict] = Depends(get_optional_user)):
     persona = request.persona or "general"
     persona_context = PERSONA_ROADMAP_CONTEXTS.get(persona, "")
     try:
@@ -436,5 +587,9 @@ async def learning_roadmap(request: RoadmapRequest):
         async with httpx.AsyncClient() as http:
             result = await asyncio.gather(*[fetch_url(item, http) for item in result])
         result = list(result)
+
+    if user and request.search_id:
+        saved = await save_roadmap(user["uid"], request.search_id, list(result), request.persona)
+        result = saved
 
     return JSONResponse(content=result)

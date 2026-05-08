@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Firebase service account (contains private key — never commit)
+firebase_service_account.json
+
 # Python
 __pycache__/
 *.py[cod]

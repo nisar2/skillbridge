@@ -257,26 +257,22 @@ async def parse_resume(
 
 
 JOB_EXTRACT_PROMPT = """
-You are a job description parser. Given the list of raw job postings below, extract structured data for ALL of them and return ONLY a valid JSON array with no markdown or extra text.
+You are a job description parser. Extract structured data for the job posting below and return ONLY a valid JSON object with no markdown or extra text.
 
-Return this exact structure (an array, one object per job):
-[
-  {{
-    "title": "...",
-    "description": "...",
-    "qualifications": ["...", "..."]
-  }},
-  ...
-]
+Return this exact structure:
+{{
+  "title": "...",
+  "description": "...",
+  "qualifications": ["...", "..."]
+}}
 
 Rules:
 - "title" is the job title
 - "description" is a 2-3 sentence summary of the role
 - "qualifications" is a combined list of all required and preferred skills and experience
-- Return exactly {n} objects in the array, one per job posting below
 
-Job postings:
-{jobs_text}
+Job posting:
+{job_text}
 """
 
 
@@ -354,35 +350,35 @@ async def fetch_jobs(
 
     logging.info("JSearch raw jobs:\n%s", json.dumps(raw_jobs, indent=2))
 
-    # Build all job texts and send to OpenAI in a single batch call
-    jobs_text = "\n".join(_build_job_text(job, i) for i, job in enumerate(raw_jobs))
-    try:
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{
-                "role": "user",
-                "content": JOB_EXTRACT_PROMPT.format(n=len(raw_jobs), jobs_text=jobs_text),
-            }],
-            temperature=0,
-        )
-        raw = completion.choices[0].message.content
-        match = re.search(r'\[.*\]', raw, re.DOTALL)
-        if not match:
-            raise ValueError("No JSON array found in OpenAI response")
-        structured_jobs = json.loads(match.group(0))
-        # Ensure we have the right count; fall back for any missing entries
-        if len(structured_jobs) < len(raw_jobs):
-            for i in range(len(structured_jobs), len(raw_jobs)):
-                structured_jobs.append(_fallback_job(raw_jobs[i]))
-    except Exception as e:
-        logging.error("Batch job extraction failed, using fallback: %s", e)
-        structured_jobs = [_fallback_job(job) for job in raw_jobs]
+    async def _extract_one(raw_job: dict, index: int) -> dict:
+        """Call OpenAI for a single job; fall back to raw data on any failure."""
+        try:
+            job_text = _build_job_text(raw_job, index)
+            completion = await asyncio.to_thread(
+                client.chat.completions.create,
+                model="gpt-4o-mini",
+                messages=[{
+                    "role": "user",
+                    "content": JOB_EXTRACT_PROMPT.format(job_text=job_text),
+                }],
+                temperature=0,
+            )
+            raw_content = completion.choices[0].message.content
+            match = re.search(r'\{.*\}', raw_content, re.DOTALL)
+            if not match:
+                raise ValueError("No JSON object in OpenAI response")
+            result = json.loads(match.group(0))
+        except Exception as e:
+            logging.warning("Job %d extraction failed, using fallback: %s", index, e)
+            result = _fallback_job(raw_job)
+        # Always overwrite company and apply_link from the authoritative JSearch data
+        result["company"] = raw_job.get("employer_name", "")
+        result["apply_link"] = raw_job.get("job_apply_link") or raw_job.get("job_google_link", "")
+        return result
 
-    # Merge company and apply link from raw JSearch data (authoritative source)
-    for i, job in enumerate(structured_jobs):
-        if i < len(raw_jobs):
-            job["company"] = raw_jobs[i].get("employer_name", "")
-            job["apply_link"] = raw_jobs[i].get("job_apply_link") or raw_jobs[i].get("job_google_link", "")
+    structured_jobs = await asyncio.gather(
+        *[_extract_one(job, i) for i, job in enumerate(raw_jobs)]
+    )
 
     if user and search_id:
         await save_jobs(user["uid"], search_id, structured_jobs)

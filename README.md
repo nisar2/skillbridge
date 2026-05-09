@@ -108,9 +108,9 @@ The user enters a target job title and selects how many listings to fetch (1–1
 
 1. Calls the `JSearch API` with `date_posted: "week"` so only recent listings appear.
 2. For each raw job, `_build_job_text()` assembles a text block containing title, company, description (capped at 3,000 chars), and qualifications pulled from three JSearch fields: `job_highlights.Qualifications`, `job_required_skills`, and `job_required_experience`.
-3. All N job texts are sent to `gpt-4o-mini` in **a single batch call** (the job-extraction prompt), which returns a JSON array of cleaned job objects.
-4. After the OpenAI call, `company` and `apply_link` are **overwritten from raw JSearch data** rather than taken from the model output. `JSearch` is the authoritative source for these values; asking the model to copy them introduces unnecessary transcription errors.
-5. If OpenAI extraction fails or returns fewer items than expected, `_fallback_job()` fills the gaps directly from the raw JSearch response.
+3. For each raw job, `_extract_one()` is fired as an async coroutine: it sends a single-job prompt to `gpt-4o-mini` and returns a cleaned job object. All N coroutines run **concurrently via `asyncio.gather`**, so wall time is roughly the slowest single call rather than the sum of all N.
+4. After each OpenAI call, `company` and `apply_link` are **overwritten from raw JSearch data** rather than taken from the model output. `JSearch` is the authoritative source for these values; asking the model to copy them introduces unnecessary transcription errors.
+5. Each job fails independently — if one `_extract_one()` call errors, `_fallback_job()` fills in that slot from the raw JSearch response without affecting the other jobs.
 6. If the request includes a valid `Authorization` header and a `search_id`, the cleaned jobs are saved to `users/{uid}/searches/{search_id}/jobs/`.
 
 **What the frontend does:**
@@ -246,29 +246,25 @@ Resume text:
 
 ### Job Extraction Prompt (`JOB_EXTRACT_PROMPT`)
 
-Sent to `gpt-4o-mini` at `temperature=0`. `{n}` is the number of jobs requested; `{jobs_text}` is all N raw job blocks concatenated.
+Sent to `gpt-4o-mini` at `temperature=0`, once per job, all N calls running concurrently. `{job_text}` is the single job block for that call.
 
 ```
-You are a job description parser. Given the list of raw job postings below, extract structured data for ALL of them and return ONLY a valid JSON array with no markdown or extra text.
+You are a job description parser. Extract structured data for the job posting below and return ONLY a valid JSON object with no markdown or extra text.
 
-Return this exact structure (an array, one object per job):
-[
-  {
-    "title": "...",
-    "description": "...",
-    "qualifications": ["...", "..."]
-  },
-  ...
-]
+Return this exact structure:
+{
+  "title": "...",
+  "description": "...",
+  "qualifications": ["...", "..."]
+}
 
 Rules:
 - "title" is the job title
 - "description" is a 2-3 sentence summary of the role
 - "qualifications" is a combined list of all required and preferred skills and experience
-- Return exactly {n} objects in the array, one per job posting below
 
-Job postings:
-{jobs_text}
+Job posting:
+{job_text}
 ```
 
 ---
@@ -360,9 +356,11 @@ Skill gaps to address:
 
 ## Design Decisions & Tradeoffs
 
-### Single batch call for job extraction
+### Parallel per-job OpenAI extraction
 
-Rather than calling OpenAI once per job, all N raw job descriptions are sent in a single prompt. This reduces latency (one round-trip vs. N) and cost. The tradeoff is that a single model failure aborts all extractions at once — mitigated by the `_fallback_job()` function, which reconstructs each job directly from the raw JSearch response if the batch call fails or returns fewer items than expected.
+Each job is extracted in its own `gpt-4o-mini` call, and all N calls are fired concurrently via `asyncio.gather` (the OpenAI SDK is synchronous, so each call runs in a thread-pool thread via `asyncio.to_thread`). Wall time is roughly constant at ~1.5–2.5s regardless of N, compared to a sequential batch call whose latency scales linearly with token count.
+
+The earlier approach sent all N jobs concatenated into a single prompt. That works for small N but becomes the bottleneck as N grows — a 10-job batch can hit 8,000–10,000 input tokens and take 8–12 seconds. Splitting into parallel single-job calls also eliminates the risk of the model mis-counting or dropping entries from the array, and means one failed call only affects that one job (the others proceed normally with `_fallback_job()` filling the gap).
 
 ### Company and apply link come from JSearch, not OpenAI
 

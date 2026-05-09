@@ -192,7 +192,7 @@ if "current_search_id" not in st.session_state:
             else:
                 score_md = f":red[**{score}/100**]"
 
-            c1, c2, c3 = st.columns([3, 1, 1])
+            c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
             with c1:
                 st.markdown(f"**{search['job_title']}**")
                 st.caption(f"Updated {search.get('updated_at', '')[:10]}")
@@ -201,6 +201,14 @@ if "current_search_id" not in st.session_state:
             with c3:
                 if st.button("Open", key=f"open_{search['id']}"):
                     _load_search(search["id"], search["job_title"])
+                    st.rerun()
+            with c4:
+                if st.button("Delete", key=f"delete_{search['id']}", type="secondary"):
+                    api_call("delete", f"/searches/{search['id']}")
+                    # Clear active session if the deleted search was open
+                    if st.session_state.get("current_search_id") == search["id"]:
+                        for k in ("current_search_id", "job_title", "jobs", "parsed_resume", "analysis", "roadmap"):
+                            st.session_state.pop(k, None)
                     st.rerun()
             st.divider()
     else:

@@ -381,3 +381,23 @@ async def toggle_roadmap_item(uid: str, search_id: str, item_id: str, completed:
             "completed_at": _now() if completed else None,
         })
     await asyncio.to_thread(_write)
+
+
+async def delete_search(uid: str, search_id: str) -> None:
+    """Delete a search and all its subcollections (jobs, resume, analysis, roadmap)."""
+    import asyncio
+    def _delete():
+        db = _get_db()
+        search_ref = (
+            db.collection("users").document(uid)
+            .collection("searches").document(search_id)
+        )
+        for subcol in ("jobs", "roadmap"):
+            for doc in search_ref.collection(subcol).stream():
+                doc.reference.delete()
+        for subcol in ("resume", "analysis"):
+            doc = search_ref.collection(subcol).document("data").get()
+            if doc.exists:
+                doc.reference.delete()
+        search_ref.delete()
+    await asyncio.to_thread(_delete)

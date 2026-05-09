@@ -32,6 +32,7 @@ from backend.firestore_db import (
     save_roadmap,
     get_roadmap,
     toggle_roadmap_item,
+    delete_search,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -91,6 +92,12 @@ async def create_search_route(
 ):
     search_id = await create_search(current_user["uid"], body.job_title)
     return JSONResponse(content={"search_id": search_id, "job_title": body.job_title})
+
+
+@app.delete("/searches/{search_id}")
+async def delete_search_route(search_id: str, current_user: dict = Depends(get_current_user)):
+    await delete_search(current_user["uid"], search_id)
+    return JSONResponse(content={"deleted": search_id})
 
 
 @app.get("/searches/{search_id}/jobs")

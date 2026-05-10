@@ -366,7 +366,7 @@ Skill gaps to address:
 
 Rather than maintaining different prompts per persona or fine-tuning separate models, persona behaviour is implemented as a short paragraph prepended to the existing prompt. This is sufficient for the three distinct behaviours needed (standard, graduate-friendly, switcher-friendly) and requires no additional API keys or model deployments. The tradeoff is that the persona context competes for attention with the rest of the prompt — for more nuanced personas or stricter behavioural constraints, a separate system prompt or dedicated fine-tune would be the next step.
 
-### Adaptive JSearch pagination + parallel OpenAI extraction
+### Parallel JSearch + parallel OpenAI extraction
 
 **JSearch fetching:** JSearch pages are sparse — a request for page 3 might return 4 jobs, not 10. The backend uses a loop: fetch 3 pages at a time in parallel, deduplicate by `job_id`, and keep looping until `n` unique jobs are collected, JSearch can't find more jobs, or the page-20 hard cap is hit. A `Semaphore(3)` on concurrent JSearch requests prevents the API from returning `ReadTimeout` errors when fetching large N (e.g. 100 jobs).
 

@@ -26,6 +26,8 @@ An AI-powered career tool that finds real job listings, parses a PDF resume, ana
 
 ## Architecture Overview
 
+![Architecture Diagram](architecture.jpg)
+
 The pipeline has three parallel inputs that converge into a two-stage AI processing pipeline:
 
 **Persona Selection** — The user picks a persona (Recent Grad or Career Switcher) before running any analysis. The selected persona flows as a context modifier into both the Skill Gap Analysis and the Upskill Roadmap Generator, shaping how results are weighted and presented. A General option is also available which skips the persona context modification.

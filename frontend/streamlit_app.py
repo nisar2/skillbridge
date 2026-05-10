@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import copy
 import os
+from datetime import datetime, timezone
 
 BACKEND_URL = "http://localhost:8000"
 LOGO_PATH = os.path.join(os.path.dirname(__file__), "..", "logo.png")
@@ -17,8 +18,9 @@ def api_call(method: str, path: str, **kwargs) -> requests.Response:
     headers = kwargs.pop("headers", {})
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    timeout = kwargs.pop("timeout", 30)
     return getattr(requests, method)(
-        f"{BACKEND_URL}{path}", headers=headers, timeout=30, **kwargs
+        f"{BACKEND_URL}{path}", headers=headers, timeout=timeout, **kwargs
     )
 
 
@@ -195,7 +197,12 @@ if "current_search_id" not in st.session_state:
             c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
             with c1:
                 st.markdown(f"**{search['job_title']}**")
-                st.caption(f"Updated {search.get('updated_at', '')[:10]}")
+                raw_ts = search.get('updated_at', '')
+                try:
+                    local_date = datetime.fromisoformat(raw_ts).astimezone().strftime('%Y-%m-%d')
+                except Exception:
+                    local_date = raw_ts[:10]
+                st.caption(f"Updated {local_date}")
             with c2:
                 st.markdown(score_md)
             with c3:
@@ -259,7 +266,7 @@ with col1:
         value=st.session_state.get("job_title", ""),
     )
 with col2:
-    n_jobs = st.number_input("# of jobs", min_value=1, max_value=10, value=3)
+    n_jobs = st.number_input("# of jobs", min_value=1, max_value=100, value=3)
 
 if st.session_state.get("jobs"):
     st.caption(
@@ -273,10 +280,12 @@ if st.button("Search Jobs", disabled=not job_title_input):
             "post",
             "/fetch_jobs",
             params={"job_title": job_title_input, "n": n_jobs, "search_id": search_id},
+            timeout=None,
         )
     if resp.ok:
         st.session_state["jobs"] = resp.json()
         st.session_state["job_title"] = job_title_input
+        st.session_state["jobs_page"] = 0
         # Invalidate downstream results since jobs changed
         st.session_state.pop("analysis", None)
         st.session_state.pop("roadmap", None)
@@ -289,9 +298,25 @@ if st.button("Search Jobs", disabled=not job_title_input):
         st.error(f"Error: {detail}")
 
 if st.session_state.get("jobs"):
-    st.markdown(f"### Listings for: _{st.session_state.get('job_title', '')}_")
-    for i, job in enumerate(st.session_state["jobs"]):
-        with st.expander(job.get("title", f"Job {i+1}"), expanded=False):
+    jobs_list = st.session_state["jobs"]
+    PAGE_SIZE = 10
+    total_pages = max(1, (len(jobs_list) + PAGE_SIZE - 1) // PAGE_SIZE)
+
+    if "jobs_page" not in st.session_state:
+        st.session_state["jobs_page"] = 0
+    # Clamp page in case jobs list shrank
+    st.session_state["jobs_page"] = min(st.session_state["jobs_page"], total_pages - 1)
+    page = st.session_state["jobs_page"]
+
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+    page_jobs = jobs_list[start:end]
+
+    st.markdown(f"### Listings for: _{st.session_state.get('job_title', '')}_ ({len(jobs_list)} total)")
+
+    for i, job in enumerate(page_jobs):
+        abs_i = start + i
+        with st.expander(job.get("title", f"Job {abs_i + 1}"), expanded=False):
             company = job.get("company", "")
             apply_link = job.get("apply_link", "")
             if company:
@@ -305,10 +330,27 @@ if st.session_state.get("jobs"):
                 if apply_link:
                     st.link_button("Apply Now", apply_link)
             with c_del:
-                if st.button("🗑️ Remove", key=f"remove_job_{i}"):
-                    st.session_state["jobs"].pop(i)
+                if st.button("🗑️ Remove", key=f"remove_job_{abs_i}"):
+                    st.session_state["jobs"].pop(abs_i)
                     _persist_jobs()
+                    st.session_state["jobs_page"] = min(
+                        st.session_state["jobs_page"],
+                        max(0, (len(st.session_state["jobs"]) - 1) // PAGE_SIZE),
+                    )
                     st.rerun()
+
+    if total_pages > 1:
+        pc1, pc2, pc3 = st.columns([1, 2, 1])
+        with pc1:
+            if st.button("← Prev", disabled=page == 0):
+                st.session_state["jobs_page"] -= 1
+                st.rerun()
+        with pc2:
+            st.caption(f"Page {page + 1} of {total_pages}")
+        with pc3:
+            if st.button("Next →", disabled=page >= total_pages - 1):
+                st.session_state["jobs_page"] += 1
+                st.rerun()
 
     with st.expander("View raw jobs JSON"):
         st.json(st.session_state["jobs"])

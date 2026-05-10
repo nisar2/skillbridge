@@ -317,7 +317,7 @@ def _fallback_job(job: dict) -> dict:
 @app.post("/fetch_jobs")
 async def fetch_jobs(
     job_title: str = Query(..., description="Job title to search for"),
-    n: int = Query(2, ge=1, le=10, description="Number of job listings to fetch"),
+    n: int = Query(2, ge=1, le=100, description="Number of job listings to fetch"),
     search_id: Optional[str] = Query(None),
     user: Optional[dict] = Depends(get_optional_user),
 ):
@@ -329,56 +329,109 @@ async def fetch_jobs(
         "X-RapidAPI-Key": rapidapi_key,
         "X-RapidAPI-Host": "jsearch.p.rapidapi.com",
     }
-    params = {"query": job_title, "page": "1", "num_pages": "1", "date_posted": "week"}
 
-    async with httpx.AsyncClient() as http:
-        resp = await http.get(
-            "https://jsearch.p.rapidapi.com/search",
-            headers=headers,
-            params=params,
-            timeout=15,
-        )
+    # Limit concurrent JSearch requests to avoid overwhelming the API
+    jsearch_sem = asyncio.Semaphore(3)
 
-    logging.info("JSearch status: %s, body: %s", resp.status_code, resp.text[:300])
+    async def _fetch_page(page: int) -> list:
+        async with jsearch_sem:
+            async with httpx.AsyncClient() as http:
+                try:
+                    resp = await http.get(
+                        "https://jsearch.p.rapidapi.com/search",
+                        headers=headers,
+                        params={"query": job_title, "page": str(page), "num_pages": "1", "date_posted": "week"},
+                        timeout=30,
+                    )
+                except httpx.ReadTimeout:
+                    logging.warning("JSearch page %d timed out", page)
+                    return []
+        if resp.status_code != 200:
+            logging.warning("JSearch page %d error: %s", page, resp.text[:200])
+            return []
+        return resp.json().get("data", [])
 
-    if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"JSearch API error: {resp.text[:200]}")
+    # Fetch pages in batches of 3 until we have n unique jobs or JSearch runs dry.
+    # JSearch often returns fewer than 10 per page, so we can't pre-calculate exactly
+    # how many pages we need — we keep going until the target is met.
+    seen_ids: set = set()
+    raw_jobs: list = []
+    next_page = 1
+    max_page = 20  # hard cap to avoid infinite loops on very large n
 
-    raw_jobs = resp.json().get("data", [])[:n]
+    logging.info("[job search] Fetching up to %d jobs for '%s'", n, job_title)
+
+    while len(raw_jobs) < n and next_page <= max_page:
+        batch_pages = list(range(next_page, min(next_page + 3, max_page + 1)))
+        next_page += len(batch_pages)
+        logging.info("[job search] Requesting JSearch pages %s", batch_pages)
+        page_results = await asyncio.gather(*[_fetch_page(p) for p in batch_pages])
+
+        batch_had_results = False
+        for page_data in page_results:
+            for job in page_data:
+                jid = job.get("job_id", "")
+                if jid and jid in seen_ids:
+                    continue
+                if jid:
+                    seen_ids.add(jid)
+                raw_jobs.append(job)
+                if len(raw_jobs) == n:
+                    break
+            if page_data:
+                batch_had_results = True
+            if len(raw_jobs) == n:
+                break
+
+        logging.info("[job search] %d/%d jobs found", len(raw_jobs), n)
+
+        # If every page in this batch came back empty, JSearch has no more results
+        if not batch_had_results:
+            logging.info("[job search] JSearch returned no more results")
+            break
+
     if not raw_jobs:
         raise HTTPException(status_code=404, detail=f"No job listings found for '{job_title}'.")
 
-    logging.info("JSearch raw jobs:\n%s", json.dumps(raw_jobs, indent=2))
+    logging.info("[job search] Collected %d raw jobs — starting OpenAI extraction", len(raw_jobs))
+
+    openai_sem = asyncio.Semaphore(10)
+    parsed_count = 0
 
     async def _extract_one(raw_job: dict, index: int) -> dict:
         """Call OpenAI for a single job; fall back to raw data on any failure."""
-        try:
-            job_text = _build_job_text(raw_job, index)
-            completion = await asyncio.to_thread(
-                client.chat.completions.create,
-                model="gpt-4o-mini",
-                messages=[{
-                    "role": "user",
-                    "content": JOB_EXTRACT_PROMPT.format(job_text=job_text),
-                }],
-                temperature=0,
-            )
-            raw_content = completion.choices[0].message.content
-            match = re.search(r'\{.*\}', raw_content, re.DOTALL)
-            if not match:
-                raise ValueError("No JSON object in OpenAI response")
-            result = json.loads(match.group(0))
-        except Exception as e:
-            logging.warning("Job %d extraction failed, using fallback: %s", index, e)
-            result = _fallback_job(raw_job)
+        nonlocal parsed_count
+        async with openai_sem:
+            try:
+                job_text = _build_job_text(raw_job, index)
+                completion = await asyncio.to_thread(
+                    client.chat.completions.create,
+                    model="gpt-4o-mini",
+                    messages=[{
+                        "role": "user",
+                        "content": JOB_EXTRACT_PROMPT.format(job_text=job_text),
+                    }],
+                    temperature=0,
+                )
+                raw_content = completion.choices[0].message.content
+                match = re.search(r'\{.*\}', raw_content, re.DOTALL)
+                if not match:
+                    raise ValueError("No JSON object in OpenAI response")
+                result = json.loads(match.group(0))
+            except Exception as e:
+                logging.warning("[job search] Job %d extraction failed, using fallback: %s", index, e)
+                result = _fallback_job(raw_job)
         # Always overwrite company and apply_link from the authoritative JSearch data
         result["company"] = raw_job.get("employer_name", "")
         result["apply_link"] = raw_job.get("job_apply_link") or raw_job.get("job_google_link", "")
+        parsed_count += 1
+        logging.info("[job search] %d/%d jobs parsed", parsed_count, len(raw_jobs))
         return result
 
     structured_jobs = await asyncio.gather(
         *[_extract_one(job, i) for i, job in enumerate(raw_jobs)]
     )
+    logging.info("[job search] Done — returning %d jobs", len(structured_jobs))
 
     if user and search_id:
         await save_jobs(user["uid"], search_id, structured_jobs)

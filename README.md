@@ -2,7 +2,7 @@
 
 An AI-powered career tool that finds real job listings, parses a PDF resume, analyses skill gaps against those listings, and generates a personalised learning roadmap with verified resource URLs — all persisted per-user via Firebase Firestore and secured with Google OAuth 2.0.
 
-🎥 Video Presentation *(link coming soon)*
+🎥 [Video Presentation](https://youtu.be/GNOrc4h-SYY?si=V2uPi3b1weqdLD1g)
 
 📊 [Slide Deck](https://docs.google.com/presentation/d/16oonIEplB5HSoW5fj9-vSnraVWM9CUUfhHlZ4dj3D74/edit?usp=sharing)
 

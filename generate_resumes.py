@@ -196,11 +196,84 @@ def build_rachel():
     return out_path
 
 
+# ─── Jamie Park v2 ────────────────────────────────────────────────────────────
+
+def build_jamie_v2():
+    pdf = ResumePDF(format="Letter")
+    pdf.set_margins(15, 15, 15)
+    pdf.add_page()
+
+    pdf.name_block(
+        "Jamie Park",
+        "jamiepark359@gmail.com  |  (734) 555-0192  |  linkedin.com/in/jamiepark  |  github.com/jamiepark",
+    )
+
+    # Education
+    pdf.section("Education")
+    pdf.entry(
+        "University of Michigan  -  B.S. Computer Science & Statistics",
+        "Aug 2020 - May 2024",
+        "GPA: 3.72 / 4.00",
+    )
+    pdf.set_font("Helvetica", "", 9.5)
+    pdf.set_x(pdf.l_margin + 4)
+    pdf.multi_cell(
+        0,
+        4.5,
+        "Coursework: Machine Learning, Deep Learning, Statistical Inference, Database Systems, "
+        "Data Structures & Algorithms, Probability Theory",
+    )
+
+    # Work Experience
+    pdf.section("Work Experience")
+    pdf.entry("Data Analytics Intern  -  ShipFast Logistics", "May 2023 - Aug 2023")
+    pdf.bullet("Built 6 Tableau dashboards tracking delivery KPIs across 12 regional hubs, reducing manual reporting time by 40%")
+    pdf.bullet("Wrote SQL queries against a PostgreSQL database to extract and aggregate shipment delay data for weekly operations review")
+    pdf.bullet("Automated weekly Excel summary reports using Python and openpyxl, eliminating a 3-hour recurring manual process")
+
+    # Projects
+    pdf.section("Projects")
+
+    # v2: Sentiment Classifier extended with deployment bullets
+    pdf.entry("Sentiment Classifier (Undergraduate Thesis)", "Jan 2024 - Jun 2024")
+    pdf.bullet("Fine-tuned a BERT model on 50,000 Amazon product reviews for multi-class sentiment classification (Positive/Neutral/Negative)")
+    pdf.bullet("Achieved 91.3% accuracy on held-out test set, outperforming TF-IDF + Logistic Regression baseline (82.1%)")
+    pdf.bullet("Containerised the model with Docker and deployed as a REST inference endpoint to GCP Cloud Run; endpoint serves live predictions via HTTP")
+    pdf.bullet("Built a GitHub Actions CI/CD pipeline that runs the test suite and redeploys the container on every push to main")
+    pdf.bullet("Stack: Python, PyTorch, HuggingFace Transformers, Scikit-learn, Docker, GCP Cloud Run, GitHub Actions")
+
+    pdf.ln(1)
+    pdf.entry("Movie Recommendation System", "Sep 2023 - Dec 2023")
+    pdf.bullet("Implemented collaborative filtering via matrix factorization (ALS) trained on the MovieLens 1M dataset")
+    pdf.bullet("Exposed recommendations through a REST API; evaluated with RMSE and precision@k metrics")
+    pdf.bullet("Stack: Python, NumPy, Pandas, Scikit-learn, Flask, Git")
+
+    pdf.ln(1)
+    pdf.entry("Campus Event Multi-Label Classifier", "Feb 2023 - Apr 2023")
+    pdf.bullet("Built a multi-label text classifier to auto-tag university event listings using Logistic Regression and Random Forest")
+    pdf.bullet("Scraped and cleaned 4,000 event records; achieved F1-score of 0.84 across 8 categories")
+    pdf.bullet("Stack: Python, Scikit-learn, BeautifulSoup, Pandas")
+
+    # Skills — v2 adds Docker, GCP, GitHub Actions
+    pdf.section("Skills")
+    pdf.skills_row("Languages", "Python, R, SQL, Bash")
+    pdf.skills_row("ML / AI", "PyTorch, HuggingFace Transformers, Scikit-learn, NumPy, Pandas, Matplotlib")
+    pdf.skills_row("Data & Viz", "Tableau, Jupyter Notebook, PostgreSQL, openpyxl")
+    pdf.skills_row("Tools", "Git, GitHub Actions, Docker, GCP (Cloud Run), VS Code, Linux")
+
+    out_path = os.path.join(OUTPUT_DIR, "jamie_park_resume_v2.pdf")
+    pdf.output(out_path)
+    return out_path
+
+
 if __name__ == "__main__":
     jamie_path = build_jamie()
     print(f"Generated: {jamie_path}")
 
     rachel_path = build_rachel()
     print(f"Generated: {rachel_path}")
+
+    jamie_v2_path = build_jamie_v2()
+    print(f"Generated: {jamie_v2_path}")
 
     print("Done.")

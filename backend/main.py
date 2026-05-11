@@ -331,7 +331,7 @@ async def fetch_jobs(
     }
 
     # Limit concurrent JSearch requests to avoid overwhelming the API
-    jsearch_sem = asyncio.Semaphore(3)
+    jsearch_sem = asyncio.Semaphore(5)
 
     async def _fetch_page(page: int) -> list:
         async with jsearch_sem:

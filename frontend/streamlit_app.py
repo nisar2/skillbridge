@@ -129,9 +129,6 @@ with st.sidebar:
     if os.path.exists(LOGO_PATH):
         st.image(LOGO_PATH, use_container_width=True)
     st.divider()
-    photo = user.get("photo_url", "")
-    if photo:
-        st.image(photo, width=48)
     st.markdown(f"**{user.get('name', 'User')}**")
     st.caption(user.get("email", ""))
     st.divider()

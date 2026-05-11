@@ -51,7 +51,7 @@ The three outputs feed into the two-stage AI pipeline:
 - The frontend ([`Streamlit`](https://streamlit.io/)) and backend ([`FastAPI`](https://fastapi.tiangolo.com/)) communicate over HTTP.
 - `FastAPI` was chosen over `Flask` for its native async support, which is leveraged during the API calls to help search large amounts of jobs and compare a user's resume against them.
 - `Streamlit` was chosen so the entire UI could be written in Python without HTML/CSS/JS.
-- The state is maintained in `st.session_state`. All completed steps are persisted to Firebase Firestore (when authenticated) so users can return to past searches without re-running the pipeline and track their progress towards becoming a good candidate for a particular job.
+- The state is maintained in `st.session_state`. All completed steps are persisted to Firebase Firestore so users can return to past searches without re-running the pipeline and track their progress towards becoming a good candidate for a particular job.
 
 ---
 
@@ -69,15 +69,15 @@ Authentication delegates identity verification entirely to Google — the app ne
 
 3. **The backend redeems the code** → it POSTs the code plus the client secret to Google server-to-server. Google verifies all four values (code, client ID, client secret, redirect URI) and returns an access token. The backend uses that access token to call Google's userinfo endpoint and retrieve the user's name, email, and stable numeric ID (`sub`). Google is now out of the picture.
 
-4. **The backend mints its own JWT and hands it to Streamlit** → rather than passing Google's token around, the backend issues a 7-day HS256 JWT signed with `JWT_SECRET`, containing `{uid, email, name, photo_url}`. This token is appended to the Streamlit URL as `?token=<jwt>`. Streamlit reads it on load, validates it against the backend (`GET /auth/me`), and stores the decoded user in `st.session_state`.
+4. **The backend signs its own JSON Web Token (JWT) and hands it to Streamlit** → rather than passing Google's token around, the backend issues a 7-day HS256 JWT signed with `JWT_SECRET`, containing `{uid, email, name, photo_url}`. This token is appended to the Streamlit URL as `?token=<jwt>`. Streamlit reads it on load, validates it against the backend (`GET /auth/me`), and stores the decoded user in `st.session_state`.
 
-From this point on, every API call from Streamlit includes the JWT in an `Authorization: Bearer` header. The backend verifies it cryptographically using `JWT_SECRET` — no database lookup, no call to Google. A `get_optional_user` variant is used on AI routes that work both authenticated and unauthenticated.
+From this point on, every API call from Streamlit includes the JWT in an `Authorization: Bearer` header. The backend verifies it cryptographically using `JWT_SECRET`. A `get_optional_user` variant is used on AI routes that work both authenticated and unauthenticated.
 
-The user's `uid` (Google's `sub` value) is the stable key that ties everything together in Firestore — it never changes even if the user updates their Google email or name.
+The user's `uid` (Google's `sub` value) is the key that ties everything together in Firestore.
 
 ### Firestore Persistence (`backend/firestore_db.py`)
 
-Each user owns a collection of job searches. Every search is self-contained: it stores the job listings fetched for that target role, the version of the resume the user uploaded (and optionally edited) for that role, the gap analysis derived from comparing that resume against those listings, and the personalised roadmap generated from the identified gaps. Because each search has its own jobs and its own resume, two searches for different roles produce completely independent gap analyses and roadmaps — a user can track progress toward multiple job targets simultaneously without any data bleeding between them.
+Each user owns a collection of job searches. Every search is self-contained: it stores the job listings fetched for that target role, the version of the resume the user uploaded (and optionally edited) for that role, the gap analysis derived from comparing that resume against those listings, and the personalised roadmap generated from the identified gaps. Because each search has its own jobs and its own resume, two searches for different roles produce completely independent gap analyses and roadmaps which allows a user to track progress toward multiple job targets simultaneously.
 
 **Document schema:**
 
@@ -132,7 +132,7 @@ The user enters a target job title and selects how many listings to fetch (1–1
 
 **What the backend does — Phase 1: Adaptive JSearch fetching**
 
-JSearch pages are sparse and inconsistently sized, so the number of pages needed to collect N jobs cannot be pre-calculated. The backend uses an adaptive loop:
+JSearch pages are sparse and inconsistently sized, so the number of pages needed to collect N jobs cannot be pre-calculated. The backend uses a loop:
 
 1. Fetch 3 JSearch pages at a time in parallel, each with `date_posted: "week"` so only recent listings appear. Concurrent page requests are throttled to 3 at a time via `asyncio.Semaphore(3)` to avoid overwhelming the API.
 2. Deduplicate results by `job_id` as each page arrives.
@@ -185,7 +185,7 @@ Once a resume and at least one job are present, the **Analyse My Profile** butto
 
 1. Looks up the persona-specific context string from `PERSONA_GAP_CONTEXTS` (empty string for `"general"`).
 2. For the `"switcher"` persona, injects an extra JSON field instruction (`"transferable_skills"`) into the prompt so the model returns that section.
-3. Sends the assembled prompt to `gpt-4o-mini` at `temperature=0` for deterministic results.
+3. Sends the assembled prompt to `gpt-4o-mini`.
 4. Returns: `{ score, summary, strengths, gaps, suggestions }` plus optionally `transferable_skills`.
 5. If authenticated, saves the full result to `users/{uid}/searches/{search_id}/analysis`.
 
@@ -205,7 +205,7 @@ Available only after gap analysis has run and found at least one gap. The **Gene
 **What the backend does:**
 
 1. Looks up the persona-specific context string from `PERSONA_ROADMAP_CONTEXTS`.
-2. Sends the roadmap prompt to `gpt-4o-mini` at `temperature=0.2` (slight creativity allowed for resource suggestions).
+2. Sends the roadmap prompt to `gpt-4o-mini`.
 3. For each roadmap item, fires a `Brave Search` query (`"{resource name} {provider}"`) to fetch a real URL. All queries run concurrently via `asyncio.gather` with a `Semaphore(3)` to stay within Brave's rate limits.
 4. Returns the enriched array: `[ { skill, resource, provider, type, cost, time_estimate, timeframe, url } ]`.
 5. If authenticated, saves the roadmap to `users/{uid}/searches/{search_id}/roadmap/`, merging against any existing completion state.

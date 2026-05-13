@@ -11,7 +11,7 @@ import logging
 import asyncio
 import httpx
 import pdfplumber
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 from dotenv import load_dotenv
 
 from backend.auth import (
@@ -40,6 +40,7 @@ logging.basicConfig(level=logging.INFO)
 load_dotenv(override=True)
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+async_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 app = FastAPI()
 
@@ -330,81 +331,28 @@ async def fetch_jobs(
         "X-RapidAPI-Host": "jsearch.p.rapidapi.com",
     }
 
-    JSEARCH_CONCURRENCY = 3  # max concurrent JSearch requests (rate-limit-driven)
-    pages_needed = n//10
-    if pages_needed < 2:
-        JSEARCH_BATCH_SIZE = 2
-    elif pages_needed > 6:
-        JSEARCH_BATCH_SIZE = 6
-    else:
-        JSEARCH_BATCH_SIZE = pages_needed
-
-    # Limit concurrent JSearch requests to avoid overwhelming the API
+    JSEARCH_CONCURRENCY = 5  # max concurrent JSearch requests (rate-limit-driven)
     jsearch_sem = asyncio.Semaphore(JSEARCH_CONCURRENCY)
+    openai_sem = asyncio.Semaphore(10)
 
-    async def _fetch_page(page: int) -> list:
+    # Shared httpx client — one connection pool for all JSearch requests in this call
+    async def _fetch_page(page: int, http: httpx.AsyncClient) -> list:
         async with jsearch_sem:
-            async with httpx.AsyncClient() as http:
-                try:
-                    resp = await http.get(
-                        "https://jsearch.p.rapidapi.com/search",
-                        headers=headers,
-                        params={"query": job_title, "page": str(page), "num_pages": "1", "date_posted": "week"},
-                        timeout=30,
-                    )
-                except httpx.ReadTimeout:
-                    logging.warning("JSearch page %d timed out", page)
-                    return []
+            try:
+                resp = await http.get(
+                    "https://jsearch.p.rapidapi.com/search",
+                    headers=headers,
+                    params={"query": job_title, "page": str(page), "num_pages": "1", "date_posted": "week"},
+                    timeout=30,
+                )
+            except httpx.ReadTimeout:
+                logging.warning("JSearch page %d timed out", page)
+                return []
         if resp.status_code != 200:
             logging.warning("JSearch page %d error: %s", page, resp.text[:200])
             return []
         return resp.json().get("data", [])
 
-    # Fetch pages in batches of 3 until we have n unique jobs or JSearch runs dry.
-    # JSearch often returns fewer than 10 per page, so we can't pre-calculate exactly
-    # how many pages we need — we keep going until the target is met.
-    seen_ids: set = set()
-    raw_jobs: list = []
-    next_page = 1
-    max_page = 20  # hard cap to avoid infinite loops on very large n
-
-    logging.info("[job search] Fetching up to %d jobs for '%s'", n, job_title)
-
-    while len(raw_jobs) < n and next_page <= max_page:
-        batch_pages = list(range(next_page, min(next_page + JSEARCH_BATCH_SIZE, max_page + 1)))
-        next_page += len(batch_pages)
-        logging.info("[job search] Requesting JSearch pages %s", batch_pages)
-        page_results = await asyncio.gather(*[_fetch_page(p) for p in batch_pages])
-
-        batch_had_results = False
-        for page_data in page_results:
-            for job in page_data:
-                jid = job.get("job_id", "")
-                if jid and jid in seen_ids:
-                    continue
-                if jid:
-                    seen_ids.add(jid)
-                raw_jobs.append(job)
-                if len(raw_jobs) == n:
-                    break
-            if page_data:
-                batch_had_results = True
-            if len(raw_jobs) == n:
-                break
-
-        logging.info("[job search] %d/%d jobs found", len(raw_jobs), n)
-
-        # If every page in this batch came back empty, JSearch has no more results
-        if not batch_had_results:
-            logging.info("[job search] JSearch returned no more results")
-            break
-
-    if not raw_jobs:
-        raise HTTPException(status_code=404, detail=f"No job listings found for '{job_title}'.")
-
-    logging.info("[job search] Collected %d raw jobs — starting OpenAI extraction", len(raw_jobs))
-
-    openai_sem = asyncio.Semaphore(10)
     parsed_count = 0
 
     async def _extract_one(raw_job: dict, index: int) -> dict:
@@ -413,8 +361,8 @@ async def fetch_jobs(
         async with openai_sem:
             try:
                 job_text = _build_job_text(raw_job, index)
-                completion = await asyncio.to_thread(
-                    client.chat.completions.create,
+                # AsyncOpenAI — native coroutine, no thread dispatch overhead
+                completion = await async_client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[{
                         "role": "user",
@@ -434,12 +382,51 @@ async def fetch_jobs(
         result["company"] = raw_job.get("employer_name", "")
         result["apply_link"] = raw_job.get("job_apply_link") or raw_job.get("job_google_link", "")
         parsed_count += 1
-        logging.info("[job search] %d/%d jobs parsed", parsed_count, len(raw_jobs))
+        logging.info("[job search] %d/%d jobs parsed", parsed_count, n)
         return result
 
-    structured_jobs = await asyncio.gather(
-        *[_extract_one(job, i) for i, job in enumerate(raw_jobs)]
-    )
+    seen_ids: set = set()
+    raw_jobs: list = []
+    extraction_tasks: list = []
+    max_page = 20  # hard cap
+
+    # Over-fetch pages slightly to absorb dedup losses (each page ≈ 10 jobs)
+    pages_to_fetch = min((n + 9) // 10 + 3, max_page)
+
+    logging.info("[job search] Fetching up to %d jobs for '%s' across %d pages", n, job_title, pages_to_fetch)
+
+    async with httpx.AsyncClient() as http:
+        # Launch all page fetches immediately; semaphore caps true concurrency at JSEARCH_CONCURRENCY.
+        # Using as_completed so each page's extraction starts the instant that page returns,
+        # overlapping with still-in-flight page fetches.
+        page_tasks = [asyncio.create_task(_fetch_page(p, http)) for p in range(1, pages_to_fetch + 1)]
+
+        for page_future in asyncio.as_completed(page_tasks):
+            page_data = await page_future  # yielding here lets prior-page extraction tasks run
+
+            for job in page_data:
+                jid = job.get("job_id", "")
+                if jid and jid in seen_ids:
+                    continue
+                if jid:
+                    seen_ids.add(jid)
+                raw_jobs.append(job)
+                extraction_tasks.append(asyncio.create_task(_extract_one(job, len(raw_jobs) - 1)))
+                if len(raw_jobs) >= n:
+                    break
+
+            logging.info("[job search] %d/%d jobs found so far", len(raw_jobs), n)
+
+            if len(raw_jobs) >= n:
+                for t in page_tasks:
+                    t.cancel()
+                break
+
+    if not raw_jobs:
+        raise HTTPException(status_code=404, detail=f"No job listings found for '{job_title}'.")
+
+    logging.info("[job search] Collected %d raw jobs — awaiting %d extraction tasks", len(raw_jobs), len(extraction_tasks))
+    structured_jobs = list(await asyncio.gather(*extraction_tasks))
     logging.info("[job search] Done — returning %d jobs", len(structured_jobs))
 
     if user and search_id:

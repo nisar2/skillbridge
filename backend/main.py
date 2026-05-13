@@ -330,8 +330,17 @@ async def fetch_jobs(
         "X-RapidAPI-Host": "jsearch.p.rapidapi.com",
     }
 
+    JSEARCH_CONCURRENCY = 3  # max concurrent JSearch requests (rate-limit-driven)
+    pages_needed = n//10
+    if pages_needed < 2:
+        JSEARCH_BATCH_SIZE = 2
+    elif pages_needed > 6:
+        JSEARCH_BATCH_SIZE = 6
+    else:
+        JSEARCH_BATCH_SIZE = pages_needed
+
     # Limit concurrent JSearch requests to avoid overwhelming the API
-    jsearch_sem = asyncio.Semaphore(5)
+    jsearch_sem = asyncio.Semaphore(JSEARCH_CONCURRENCY)
 
     async def _fetch_page(page: int) -> list:
         async with jsearch_sem:
@@ -362,7 +371,7 @@ async def fetch_jobs(
     logging.info("[job search] Fetching up to %d jobs for '%s'", n, job_title)
 
     while len(raw_jobs) < n and next_page <= max_page:
-        batch_pages = list(range(next_page, min(next_page + 3, max_page + 1)))
+        batch_pages = list(range(next_page, min(next_page + JSEARCH_BATCH_SIZE, max_page + 1)))
         next_page += len(batch_pages)
         logging.info("[job search] Requesting JSearch pages %s", batch_pages)
         page_results = await asyncio.gather(*[_fetch_page(p) for p in batch_pages])
